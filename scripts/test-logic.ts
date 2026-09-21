@@ -14,6 +14,8 @@ import {
 } from '../src/lib/tempo';
 import { placeNewIntervalOnBeat } from '../src/lib/constraints';
 import { uid } from '../src/lib/id';
+import { applyRelay, measureBeatToAbs, planRelay } from '../src/lib/relay';
+import type { Project } from '../src/types';
 
 let failures = 0;
 function check(name: string, actual: unknown, expected: unknown) {
@@ -224,6 +226,201 @@ check('default beatmap', normalizeBeatMap(undefined), {
   check('tick bpm after change', at4.bpm, 60);
   check('tick measure after change', at4.measure, 3);
   check('first tick flag', ticks[0].tempoChange, true);
+}
+
+// ---------- 声部接力排程：拍域枚举、回溯、无解分类 ----------
+
+/** 构造测试工程：n 位同声部歌手（minSingers 门槛），已有换气秒区间按人给出。 */
+function relayProject(
+  n: number,
+  minSingers: number,
+  existing: [number, number][][],
+  opts: { duration?: number; bpm?: number; changes?: { measure: number; bpm: number }[] } = {},
+): Project {
+  const partId = uid();
+  return {
+    name: 'relay-test',
+    duration: opts.duration ?? 96,
+    beatMap: { beatsPerBar: 4, beatUnit: 4, startBpm: opts.bpm ?? 120, changes: opts.changes ?? [] },
+    parts: [{ id: partId, name: '声部', color: '#60a5fa', minSingers }],
+    singers: Array.from({ length: n }, (_, i) => ({
+      id: uid(),
+      name: `歌${i + 1}`,
+      partId,
+      breaths: (existing[i] ?? []).map(([start, end]) => ({ id: uid(), start, end })),
+    })),
+  };
+}
+
+const nearRelay = (name: string, actual: number, expected: number) =>
+  near(name, actual, expected, 1e-9);
+
+// R1. 基本可行：3 人需≥2（cap=1），拍域 0–6 拍、每人 2 拍 → 三人错开，各自不重叠
+{
+  const p = relayProject(3, 2, []);
+  const partId = p.parts[0].id;
+  const r = planRelay(p, { partId, startBeat: 0, endBeat: 6, breathBeats: 2 });
+  check('R1 ok', r.ok, true);
+  if (r.ok) {
+    check('R1 one per singer', r.assignments.length, 3);
+    check(
+      'R1 starts in window',
+      r.assignments.map((a) => a.startBeat).sort((a, b) => a - b),
+      [0, 2, 4],
+    );
+    // 任意时刻至多 1 人换气（无重叠，因为相邻半开区间不冲突）
+    const ivs = r.assignments.map((a) => [a.startBeat, a.endBeat]).sort((a, b) => a[0] - b[0]);
+    check(
+      'R1 no overlaps',
+      ivs.map((a, i) => (i === 0 ? 0 : a[0] - ivs[i - 1][1])),
+      [0, 0, 0],
+    );
+    // 秒换算：120 BPM → 每拍 0.5s
+    nearRelay('R1 first start seconds', r.assignments[0].start, 0);
+    nearRelay('R1 first end seconds', r.assignments[0].end, 1);
+  }
+}
+
+// R2. 门槛内允许同时换气：4 人需≥2（cap=2），拍域 0–4 拍、每人 1 拍
+// 任一拍同时换气人数 ≤ 2；半开相邻不计重叠
+{
+  const p = relayProject(4, 2, []);
+  const partId = p.parts[0].id;
+  const r = planRelay(p, { partId, startBeat: 0, endBeat: 4, breathBeats: 1 });
+  check('R2 ok', r.ok, true);
+  if (r.ok) {
+    check('R2 four assignments', r.assignments.length, 4);
+    const counts = [0, 0, 0, 0];
+    for (const a of r.assignments) counts[a.startBeat]++;
+    check('R2 within cap each beat', counts.every((c) => c <= 2), true);
+  }
+}
+
+// R2b. cap=0（4 人需≥4）：不允许任何人换气 → 无解 threshold preexisting（无人可排）
+{
+  const p = relayProject(4, 4, []);
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 4, breathBeats: 1 });
+  check('R2b cap0 threshold', r.ok ? '' : r.reason.kind, 'threshold');
+}
+
+// R3. 歌手无可用拍位：2 人 cap=1，拍域 0–2 拍、每人 2 拍
+// 第一人空窗口可放，第二人只能放同一区间 → 若门槛允许 2 人同时换气本可以；minSingers=0 时两人都放 0
+{
+  const p0 = relayProject(2, 0, []);
+  const r0 = planRelay(p0, { partId: p0.parts[0].id, startBeat: 0, endBeat: 2, breathBeats: 2 });
+  check('R3 min0 both at 0 ok', r0.ok, true);
+
+  // 一人已有换气覆盖整窗 → 本人无位置（无可用拍位）
+  const p1 = relayProject(2, 0, [[[0, 10]], []]);
+  const r1 = planRelay(p1, { partId: p1.parts[0].id, startBeat: 0, endBeat: 2, breathBeats: 2 });
+  check('R3 no-slot kind', r1.ok ? '' : r1.reason.kind, 'no-slot');
+  if (!r1.ok && r1.reason.kind === 'no-slot') {
+    check('R3 no-slot singer', r1.reason.singerName, '歌1');
+  }
+}
+
+// R4. 覆盖门槛冲突（组合无解）：3 人需≥2（cap=1），拍域 0–4 拍、每人 2 拍
+// 长度 2 的不重叠区间只有 [0,2)、[2,4) 两个 → 第三人放不下而门槛不允许 → threshold
+{
+  const p = relayProject(3, 2, []);
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 4, breathBeats: 2 });
+  check('R4 threshold kind', r.ok ? '' : r.reason.kind, 'threshold');
+  if (!r.ok && r.reason.kind === 'threshold') check('R4 combinational', r.reason.preexisting, false);
+}
+
+// R5. 既有缺口 → preexisting threshold：cap=0（2 人需≥2）且拍域内已有一人换气
+{
+  const p = relayProject(2, 2, [[[0.5, 1.5]], []]);
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 4, breathBeats: 1 });
+  check('R5 threshold kind', r.ok ? '' : r.reason.kind, 'threshold');
+  if (!r.ok && r.reason.kind === 'threshold') check('R5 preexisting', r.reason.preexisting, true);
+}
+
+// R6. 歌手总数低于门槛 → preexisting threshold
+{
+  const p = relayProject(1, 2, []);
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 4, breathBeats: 1 });
+  check('R6 threshold kind', r.ok ? '' : r.reason.kind, 'threshold');
+  if (!r.ok && r.reason.kind === 'threshold') check('R6 preexisting', r.reason.preexisting, true);
+}
+
+// R7. 跨变速点：4/4，第 3 小节首拍（拍 8，t=4s）120→60；拍域 6–10、每人 1 拍，3 人 cap=1
+// 起点拍为整数，秒随所在段 BPM 不同
+{
+  const p = relayProject(
+    3,
+    2,
+    [],
+    { duration: 30, changes: [{ measure: 3, bpm: 60 }] },
+  );
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 6, endBeat: 10, breathBeats: 1 });
+  check('R7 ok', r.ok, true);
+  if (r.ok) {
+    for (const a of r.assignments) {
+      check('R7 start integer beat', Number.isInteger(a.startBeat), true);
+      nearRelay('R7 start beat conversion', a.start, beatToTime(a.startBeat, p.beatMap));
+      nearRelay('R7 end beat conversion', a.end, beatToTime(a.endBeat, p.beatMap));
+    }
+    // 恰好跨变速点：拍 8 → 4s；起点 6 → 3s，拍 7 → 3.5s，拍 9 → 5s
+    const at6 = r.assignments.find((a) => a.startBeat === 6)!;
+    nearRelay('R7 beat6 at 3s', at6.start, 3);
+    nearRelay('R7 beat7 0.5s long', beatToTime(7, p.beatMap) - beatToTime(6, p.beatMap), 0.5);
+    nearRelay('R7 beat9 1s long', beatToTime(10, p.beatMap) - beatToTime(9, p.beatMap), 1);
+  }
+}
+
+// R8. 与本人已有换气错开：第一人已有 [拍2,拍4)（秒 1–2s），2 人 cap=2（min0）拍域 0–6、每人2拍
+// 第一人只能避开自己的 [2,4)；方案仍成立
+{
+  const p = relayProject(2, 0, [[[1, 2]], []]); // 秒：120bpm 下拍2=1s、拍4=2s
+  const singer1 = p.singers[0].id;
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 6, breathBeats: 2 });
+  check('R8 ok', r.ok, true);
+  if (r.ok) {
+    const a1 = r.assignments.find((a) => a.singerId === singer1)!;
+    const overlap = a1.startBeat < 4 - 1e-9 && 2 < a1.endBeat - 1e-9;
+    check('R8 avoids own breath', overlap, false);
+  }
+}
+
+// R9. 一次写入：applyRelay 每人追加一段，其它字段不变
+{
+  const p = relayProject(2, 0, [[[8, 9]], []]);
+  const beforeCount = p.singers.map((s) => s.breaths.length);
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 4, breathBeats: 1 });
+  if (r.ok) {
+    const p2 = applyRelay(p, r.assignments);
+    check(
+      'R9 appended',
+      p2.singers.map((s) => s.breaths.length),
+      [beforeCount[0] + 1, beforeCount[1] + 1],
+    );
+    check('R9 first keeps old', p2.singers[0].breaths.some((b) => b.start === 8 && b.end === 9), true);
+    check('R9 project immutable', p.singers[0].breaths.length, beforeCount[0]);
+  }
+}
+
+// R10. 拍域越出全曲 → invalid
+{
+  const p = relayProject(2, 1, [], { duration: 2 }); // 120bpm 2s = 4 拍
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 6, breathBeats: 1 });
+  check('R10 invalid', r.ok ? '' : r.reason.kind, 'invalid');
+}
+
+// R11. no-slot 优先于 threshold：第一人无任何位置，同时组合本身也不可能满足门槛
+{
+  // 4 人需≥3（cap=1），拍域 0–4、每人2拍（可行组合只有 2 个位置）；
+  // 且第一人已有换气占满拍域 → 其本人无位置
+  const p = relayProject(4, 3, [[[0, 10]], [], [], []]);
+  const r = planRelay(p, { partId: p.parts[0].id, startBeat: 0, endBeat: 4, breathBeats: 2 });
+  check('R11 no-slot precedence', r.ok ? '' : r.reason.kind, 'no-slot');
+}
+
+// R12. 拍域/拍数换算辅助
+{
+  const bm = normalizeBeatMap({ beatsPerBar: 4 });
+  check('R12 measureBeatToAbs 1:1', measureBeatToAbs(bm, 1, 1), 0);
+  check('R12 measureBeatToAbs 3:2', measureBeatToAbs(bm, 3, 2), 9);
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

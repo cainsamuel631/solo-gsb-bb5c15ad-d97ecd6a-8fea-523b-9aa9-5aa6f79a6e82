@@ -5,11 +5,13 @@ import { loadProject, sanitizeProject, saveProject, uid } from './lib/storage';
 import { normalizeBeatMap } from './lib/tempo';
 import { partUnder, totalSeconds, type Segment } from './lib/coverage';
 import { applyMove, findBestMove, type OptimizeResult } from './lib/optimize';
+import { applyRelay, planRelay, relayWindowSeconds, planAssignments, type RelayPlan } from './lib/relay';
 import { MIN_DURATION, clamp } from './lib/constraints';
 import { fmtClock, fmtOffset } from './lib/format';
 import Sidebar from './components/Sidebar';
 import Timeline, { type Ghost } from './components/Timeline';
 import OptimizerPanel from './components/OptimizerPanel';
+import RelayDialog from './components/RelayDialog';
 
 export default function App() {
   const [project, setProject] = useState<Project>(() => loadProject() ?? createSampleProject());
@@ -19,6 +21,9 @@ export default function App() {
   const [previewOffset, setPreviewOffset] = useState<number | null>(null);
   const [pxPerSec, setPxPerSec] = useState(10);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
+  // 声部接力排程：对话框开合（含预填声部）与最近一次搜索方案
+  const [relayOpen, setRelayOpen] = useState<{ initialPartId: string | null } | null>(null);
+  const [relayPlan, setRelayPlan] = useState<RelayPlan | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // 本地自动保存（刷新后自动恢复）
@@ -32,10 +37,19 @@ export default function App() {
     setPreviewOffset(null);
   }, []);
 
-  /** 所有工程修改的统一入口：修改后寻优结果即失效 */
+  const clearRelay = useCallback(() => {
+    setRelayOpen(null);
+    setRelayPlan(null);
+  }, []);
+
+  /**
+   * 所有工程修改的统一入口：修改后寻优结果即失效。
+   * 接力方案仅是预览（未落盘），任何外部修改同样令其失效。
+   */
   const mutate = useCallback(
     (fn: (p: Project) => Project) => {
       clearOptimization();
+      setRelayPlan(null);
       setProject(fn);
     },
     [clearOptimization],
@@ -43,10 +57,12 @@ export default function App() {
 
   /**
    * 仅修改节拍图：换气段的实际秒位置保持不变（仅重新显示对应拍位），
-   * 因此不影响寻优结果（寻优基于秒），无需清空预览。
+   * 因此不影响寻优结果（寻优基于秒），无需清空寻优预览。
+   * 接力方案按拍定义但其秒值（幽灵块位置）依赖节拍图，编辑后须失效、提示重新搜索。
    */
   const mutateBeatMap = useCallback((fn: (b: Project['beatMap']) => Project['beatMap']) => {
     setProject((p) => ({ ...p, beatMap: normalizeBeatMap(fn(p.beatMap)) }));
+    setRelayPlan((plan) => (plan ? null : plan));
   }, []);
 
   // 选中的换气段被删除后，清空选择
@@ -60,12 +76,15 @@ export default function App() {
   }, [project, selection, clearOptimization]);
 
   const previewing = result !== null && previewOffset !== null;
+  /** 接力预览：搜索成功且对话框仍打开时，把整组待写入的换气临时叠加 */
+  const relayPreviewing = relayOpen !== null && relayPlan?.result.ok === true;
 
-  /** 预览时：把选中换气段按预览位移临时移动后的工程 */
-  const effectiveProject = useMemo(
-    () => (previewing && result ? applyMove(project, result.singerId, result.intervalId, previewOffset) : project),
-    [project, previewing, result, previewOffset],
-  );
+  /** 预览时：把选中换气段按预览位移临时移动后的工程；接力预览则叠加整组新换气 */
+  const effectiveProject = useMemo(() => {
+    if (previewing && result) return applyMove(project, result.singerId, result.intervalId, previewOffset!);
+    if (relayPreviewing && relayPlan) return applyRelay(project, planAssignments(relayPlan));
+    return project;
+  }, [project, previewing, result, previewOffset, relayPreviewing, relayPlan]);
 
   const coverage = useMemo(() => {
     const m = new Map<string, ReturnType<typeof partUnder>>();
@@ -86,6 +105,21 @@ export default function App() {
     if (!s || !b) return null;
     return { singerId: s.id, start: b.start + previewOffset, end: b.end + previewOffset };
   }, [previewing, result, project, previewOffset]);
+
+  /** 接力预览：整组幽灵块与拍域窗（供时间轴渲染） */
+  const relayGhosts: Ghost[] = useMemo(() => {
+    if (!relayPreviewing || !relayPlan) return [];
+    return planAssignments(relayPlan).map((a) => ({ singerId: a.singerId, start: a.start, end: a.end }));
+  }, [relayPreviewing, relayPlan]);
+
+  const relayWindow: { start: number; end: number } | null = useMemo(() => {
+    if (!relayOpen || !relayPlan) return null;
+    return relayWindowSeconds(
+      project.beatMap,
+      relayPlan.req.startBeat,
+      relayPlan.req.endBeat,
+    );
+  }, [relayOpen, relayPlan, project.beatMap]);
 
   // ---------- 换气段操作 ----------
   const updateInterval = useCallback(
@@ -154,6 +188,24 @@ export default function App() {
     clearOptimization();
   };
 
+  // ---------- 声部接力排程 ----------
+  const openRelay = (initialPartId: string | null) => {
+    clearOptimization();
+    setRelayPlan(null);
+    setRelayOpen({ initialPartId });
+  };
+
+  const runRelay = (partId: string, startBeat: number, endBeat: number, breathBeats: number) => {
+    const req = { partId, startBeat, endBeat, breathBeats };
+    setRelayPlan({ req, result: planRelay(project, req) });
+  };
+
+  const applyRelayPlan = () => {
+    if (!relayPlan || !relayPlan.result.ok) return;
+    setProject((p) => applyRelay(p, planAssignments(relayPlan)));
+    clearRelay();
+  };
+
   // ---------- 导入 / 导出 ----------
   const exportJson = () => {
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
@@ -172,6 +224,7 @@ export default function App() {
         const p = sanitizeProject(JSON.parse(txt));
         if (!p) throw new Error('invalid');
         clearOptimization();
+        clearRelay();
         setSelection(null);
         setProject(p);
       })
@@ -180,6 +233,7 @@ export default function App() {
 
   const loadSample = () => {
     clearOptimization();
+    clearRelay();
     setSelection(null);
     setProject(createSampleProject());
   };
@@ -210,7 +264,13 @@ export default function App() {
       </header>
 
       <div className="layout">
-        <Sidebar project={project} coverage={coverage} mutate={mutate} mutateBeatMap={mutateBeatMap} />
+        <Sidebar
+          project={project}
+          coverage={coverage}
+          mutate={mutate}
+          mutateBeatMap={mutateBeatMap}
+          onRelay={(partId) => openRelay(partId)}
+        />
 
         <main className="main">
           <div className="toolbar">
@@ -220,6 +280,9 @@ export default function App() {
               <span className="muted">（{underCount} 处{previewing ? ' · 预览中' : ''}）</span>
             </div>
             <div className="zoom">
+              <button className="relay-open-btn" onClick={() => openRelay(null)} title="在指定拍域内为声部每位歌手各安排一段换气（回溯搜索，整组幽灵块预览）">
+                🔀 声部接力排程
+              </button>
               <span className="muted">缩放</span>
               <button onClick={() => setPxPerSec((v) => clamp(v / 1.25, 3, 40))}>−</button>
               <button onClick={() => setPxPerSec((v) => clamp(v * 1.25, 3, 40))}>＋</button>
@@ -242,6 +305,8 @@ export default function App() {
             coverage={coverage}
             selection={selection}
             ghost={ghost}
+            relayGhosts={relayGhosts}
+            relayWindow={relayWindow}
             pxPerSec={pxPerSec}
             onSelect={(sel) => {
               clearOptimization();
@@ -266,6 +331,18 @@ export default function App() {
           />
         </main>
       </div>
+
+      {relayOpen && (
+        <RelayDialog
+          project={project}
+          initialPartId={relayOpen.initialPartId}
+          plan={relayPlan}
+          onSearch={runRelay}
+          onDirty={() => setRelayPlan(null)}
+          onApply={applyRelayPlan}
+          onClose={clearRelay}
+        />
+      )}
     </div>
   );
 }

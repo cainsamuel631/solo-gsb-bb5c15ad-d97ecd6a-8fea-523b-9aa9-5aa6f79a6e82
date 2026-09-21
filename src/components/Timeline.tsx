@@ -12,6 +12,11 @@ export interface Ghost {
   end: number;
 }
 
+export interface WindowBand {
+  start: number;
+  end: number;
+}
+
 type RulerMode = 'seconds' | 'beats';
 
 interface Props {
@@ -20,6 +25,10 @@ interface Props {
   coverage: Map<string, UnderSegment[]>;
   selection: Selection | null;
   ghost: Ghost | null;
+  /** 声部接力排程预览：整组待写入的新换气幽灵块 */
+  relayGhosts: Ghost[];
+  /** 接力排程拍域窗（在轨道上高亮） */
+  relayWindow: WindowBand | null;
   pxPerSec: number;
   onSelect: (sel: Selection | null) => void;
   onUpdateInterval: (singerId: string, intervalId: string, start: number, end: number) => void;
@@ -83,6 +92,18 @@ export default function Timeline(props: Props) {
     </>
   );
 
+  /** 接力排程拍域窗（覆盖所有轨道） */
+  const relayBand =
+    props.relayWindow && props.relayWindow.end > props.relayWindow.start ? (
+      <div
+        className="relay-window-band"
+        style={{
+          left: props.relayWindow.start * pxPerSec,
+          width: (props.relayWindow.end - props.relayWindow.start) * pxPerSec,
+        }}
+      />
+    ) : null;
+
   /** 换气段在节拍标尺下的标签：整拍时长显示「N拍」，否则显示秒 */
   const blockBeatLabel = (b: Segment): string | null => {
     if (!beatMode) return null;
@@ -119,6 +140,7 @@ export default function Timeline(props: Props) {
           </label>
         </div>
         <div className="track ruler" style={{ width }}>
+          {relayBand}
           {!beatMode
             ? secTicks.map((t) => (
                 <div
@@ -165,6 +187,7 @@ export default function Timeline(props: Props) {
                 </em>
               </div>
               <div className="track coverage-track" style={gridStyle}>
+                {relayBand}
                 {beatMode && beatGrid}
                 {under.map((seg) => (
                   <div
@@ -185,6 +208,7 @@ export default function Timeline(props: Props) {
               <div className="trow empty-row">
                 <div className="trow-label" />
                 <div className="track empty-track" style={{ width }}>
+                  {relayBand}
                   该声部暂无歌手，请在左侧添加
                 </div>
               </div>
@@ -206,6 +230,7 @@ export default function Timeline(props: Props) {
                   }}
                 >
                   {beatMode && beatGrid}
+                  {relayBand}
                   {singer.breaths.map((b) => (
                     <BreathBlock
                       key={b.id}
@@ -237,6 +262,26 @@ export default function Timeline(props: Props) {
                       }}
                     />
                   )}
+                  {props.relayGhosts
+                    .filter((g) => g.singerId === singer.id)
+                    .map((g) => (
+                      <div
+                        key={`relay-${g.start}-${g.end}`}
+                        className="breath-ghost relay-ghost"
+                        style={{
+                          left: g.start * pxPerSec,
+                          width: Math.max(4, (g.end - g.start) * pxPerSec),
+                          borderColor: part.color,
+                        }}
+                        title={
+                          beatMode
+                            ? `接力预览：${singer.name} 拍位 ${fmtTimeAsBeat(g.start, beatMap)} – ${fmtTimeAsBeat(g.end, beatMap)}`
+                            : `接力预览：${singer.name} 换气 ${fmtSec(g.start)} – ${fmtSec(g.end)}`
+                        }
+                      >
+                        <span className="relay-ghost-name">{singer.name}</span>
+                      </div>
+                    ))}
                 </div>
               </div>
             ))}

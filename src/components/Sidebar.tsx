@@ -17,11 +17,13 @@ interface Props {
   mutate: (fn: (p: Project) => Project) => void;
   /** 修改节拍图（不影响换气段的秒位置，也不使寻优结果失效） */
   mutateBeatMap: (fn: (b: Project['beatMap']) => Project['beatMap']) => void;
+  /** 打开该声部的接力排程对话框 */
+  onRelay: (partId: string) => void;
 }
 
 const PALETTE = ['#f472b6', '#a78bfa', '#60a5fa', '#34d399', '#fbbf24', '#f87171', '#22d3ee', '#c084fc'];
 
-export default function Sidebar({ project, coverage, mutate, mutateBeatMap }: Props) {
+export default function Sidebar({ project, coverage, mutate, mutateBeatMap, onRelay }: Props) {
   const beatMap = project.beatMap;
 
   // ---------- 节拍图 ----------
@@ -264,6 +266,13 @@ export default function Sidebar({ project, coverage, mutate, mutateBeatMap }: Pr
               <button className="ghost-btn" onClick={() => addSinger(part.id)}>
                 ＋ 添加歌手
               </button>
+              <button
+                className="ghost-btn relay-part-btn"
+                title="在指定拍域内为该声部每位歌手各安排一段换气（回溯搜索，整组预览后一次写入）"
+                onClick={() => onRelay(part.id)}
+              >
+                🔀 接力排程
+              </button>
             </div>
           );
         })}
@@ -278,6 +287,7 @@ export default function Sidebar({ project, coverage, mutate, mutateBeatMap }: Pr
           <li>双击歌手轨道空白处：新增换气段</li>
           <li>拖动换气段：整体移动；拖动两端：调整时长</li>
           <li>时间轴可在「秒 / 拍」标尺间切换，勾选「按拍吸附」后新增与拖拽自动落到整拍</li>
+          <li>「🔀 接力排程」：按拍域为整组歌手回溯排布换气，幽灵块预览后一次写入</li>
           <li>点击换气段选中后，可在右下方面板一键寻优</li>
           <li>Delete / Backspace：删除选中的换气段</li>
         </ul>

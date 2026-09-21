@@ -787,3 +787,159 @@ input[type='number'] {
 .beat-grid-line.major {
   background: rgba(125, 211, 252, 0.35);
 }
+
+/* ---------- 声部接力排程 ---------- */
+.relay-open-btn {
+  border-color: #a16207;
+  color: #fde68a;
+}
+
+.relay-part-btn {
+  border-color: #a16207;
+  color: #fcd34d;
+}
+
+.relay-window-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(252, 211, 77, 0.07);
+  border-left: 1px dashed rgba(252, 211, 77, 0.7);
+  border-right: 1px dashed rgba(252, 211, 77, 0.7);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.relay-ghost {
+  border-width: 2px;
+  border-style: dashed;
+  border-color: #fcd34d;
+  background: rgba(252, 211, 77, 0.12);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.relay-ghost-name {
+  position: absolute;
+  left: 4px;
+  font-size: 10px;
+  color: #fde68a;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.relay-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.62);
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 56px 16px 16px;
+  overflow-y: auto;
+}
+
+.relay-dialog {
+  width: min(680px, 100%);
+  background: var(--panel);
+  border: 1px solid #a16207;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  padding: 16px 18px;
+}
+
+.relay-dialog h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.relay-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.relay-form select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+}
+
+.relay-beat-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.relay-beat-row .relay-label {
+  width: 64px;
+  flex: none;
+  color: var(--muted);
+}
+
+.relay-beat-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.relay-beat-row input {
+  width: 58px;
+}
+
+.relay-summary {
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.relay-error-inline {
+  color: var(--bad);
+  font-size: 12px;
+}
+
+.relay-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+
+.relay-ok {
+  color: var(--ok);
+  font-size: 13px;
+}
+
+.relay-fail {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.relay-fail-detail {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.relay-table {
+  margin-top: 8px;
+}
