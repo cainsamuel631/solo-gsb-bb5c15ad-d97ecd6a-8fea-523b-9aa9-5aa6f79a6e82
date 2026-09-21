@@ -279,6 +279,7 @@ export default function Sidebar({ project, coverage, mutate, mutateBeatMap }: Pr
           <li>拖动换气段：整体移动；拖动两端：调整时长</li>
           <li>时间轴可在「秒 / 拍」标尺间切换，勾选「按拍吸附」后新增与拖拽自动落到整拍</li>
           <li>点击换气段选中后，可在右下方面板一键寻优</li>
+          <li>在下方「声部接力排程」选择声部、起止拍位与每人换气拍数，可回溯搜索整组接力换气，幽灵块预览后再整组写入</li>
           <li>Delete / Backspace：删除选中的换气段</li>
         </ul>
       </section>

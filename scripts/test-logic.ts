@@ -13,6 +13,8 @@ import {
   updateBeatMap,
 } from '../src/lib/tempo';
 import { placeNewIntervalOnBeat } from '../src/lib/constraints';
+import { applyRelay, planRelay } from '../src/lib/relay';
+import type { Project } from '../src/types';
 import { uid } from '../src/lib/id';
 
 let failures = 0;
@@ -224,6 +226,169 @@ check('default beatmap', normalizeBeatMap(undefined), {
   check('tick bpm after change', at4.bpm, 60);
   check('tick measure after change', at4.measure, 3);
   check('first tick flag', ticks[0].tempoChange, true);
+}
+
+// ---------- 声部接力排程：回溯搜索、整组约束、两类无解 ----------
+
+/** 构造恒速（或给定节拍图）测试工程：每位歌手的已有换气以 [start,end) 秒给出。 */
+function relayProject(
+  breaths: [number, number][][],
+  opts: { minSingers?: number; duration?: number; bpm?: number; changes?: { measure: number; bpm: number }[] } = {},
+): Project {
+  const bpm = opts.bpm ?? 120;
+  const bm = normalizeBeatMap(
+    opts.changes ? { startBpm: bpm, changes: opts.changes.map((c) => ({ id: uid(), ...c })) } : { startBpm: bpm },
+  );
+  const part = { id: 'p1', name: '测试声部', color: '#60a5fa', minSingers: opts.minSingers ?? 1 };
+  return {
+    name: 'relay-test',
+    duration: opts.duration ?? 60,
+    beatMap: bm,
+    parts: [part],
+    singers: breaths.map((bs, i) => ({
+      id: `s${i}`,
+      name: `歌手${i + 1}`,
+      partId: 'p1',
+      breaths: bs.map(([start, end]) => ({ id: uid(), start, end })),
+    })),
+  };
+}
+
+const beatTimes = (p: Project, beats: number[]) => beats.map((b) => beatToTime(b, p.beatMap));
+
+// 18. 基本可行：3 人声部门槛 2（最多同时 1 人换气），拍域 8 拍每人 2 拍 → 阶梯接力
+{
+  const p = relayProject([[], [], []], { minSingers: 2, bpm: 120 }); // 每拍 0.5s
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 8, breathBeats: 2 });
+  check('relay feasible', r.ok, true);
+  if (r.ok) {
+    const starts = r.assignments.map((a) => a.startBeat).sort((x, y) => x - y);
+    check('relay staggered beats', starts, [0, 2, 4]);
+    check('relay times', r.assignments.map((a) => [a.start, a.end]).sort((x, y) => x[0] - y[0]), [
+      [0, 1],
+      [1, 2],
+      [2, 3],
+    ]);
+    // 每人恰好新增一段，且都落在拍域窗口内
+    check(
+      'relay in-window',
+      r.assignments.every((a) => a.start >= r.windowStart - 1e-9 && a.end <= r.windowEnd + 1e-9),
+      true,
+    );
+  }
+}
+
+// 19. 不与歌手已有换气重叠：已有换气堵死窗口 → no-slot，并指出具体歌手
+{
+  // 窗口拍 0–6（0–3s），每段 2 拍；歌手1 的 [0.5,2.5) 与窗口内全部两个候选 [0,1)/[2,3) 都撞
+  const p = relayProject([[[0.5, 2.5]]], { minSingers: 1, bpm: 120 });
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 6, breathBeats: 2 });
+  check('relay no-slot reason', r.ok ? null : r.reason, 'no-slot');
+  check('relay no-slot singer', r.ok ? null : r.singers, ['歌手1']);
+}
+
+// 20. 覆盖门槛冲突：2 人门槛 2（任何人换气都会低于门槛）→ coverage
+{
+  const p = relayProject([[], []], { minSingers: 2, bpm: 120 });
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 8, breathBeats: 2 });
+  check('relay coverage reason', r.ok ? null : r.reason, 'coverage');
+}
+
+// 21. 覆盖门槛冲突：单人有位但整体排不下 —— 3 人门槛 2（最多 1 人换气），窗口仅 4 拍每人 2 拍
+{
+  const p = relayProject([[], [], []], { minSingers: 2, bpm: 120 });
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 4, breathBeats: 2 });
+  check('relay window-too-tight', r.ok, false);
+  check('relay tight reason', r.ok ? null : r.reason, 'coverage');
+}
+
+// 22. 门槛放宽后同一拍域有解：3 人门槛 1（最多 2 人同时换气），窗口 4 拍每人 2 拍
+//     → 前两人同在 [0,1)，第三人 [1,2)，始终至少 1 人发声
+{
+  const p = relayProject([[], [], []], { minSingers: 1, bpm: 120 });
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 4, breathBeats: 2 });
+  check('relay tight ok with lower threshold', r.ok, true);
+  if (r.ok) {
+    const [t0, t2] = beatTimes(p, [0, 2]);
+    check(
+      'relay lower-threshold packing',
+      r.assignments.map((a) => [a.start, a.end]).sort((x, y) => x[0] - y[0]),
+      [
+        [t0, t0 + 1],
+        [t0, t0 + 1],
+        [t2, t2 + 1],
+      ],
+    );
+  }
+}
+
+// 23. 跨变速点按拍枚举再换算秒：120 BPM、第 3 小节首拍（拍8, t=4）变 60；
+//     窗口拍 6–12、每人 2 拍，2 人声部门槛 1
+{
+  const p = relayProject([[], []], {
+    minSingers: 1,
+    duration: 30,
+    changes: [{ measure: 3, bpm: 60 }],
+  });
+  const r = planRelay(p, { partId: 'p1', startBeat: 6, endBeat: 12, breathBeats: 2 });
+  check('relay across tempo ok', r.ok, true);
+  if (r.ok) {
+    // 候选从拍 6 起：拍6→3s、拍8→4s（变速点）、拍10→6s
+    const starts = r.assignments.map((a) => a.startBeat).sort((x, y) => x - y);
+    check('relay across tempo beats', starts, [6, 8]);
+    const a0 = r.assignments.find((a) => a.startBeat === 6)!;
+    const a1 = r.assignments.find((a) => a.startBeat === 8)!;
+    near('relay pre-change seconds', a0.start, 3);
+    near('relay pre-change end at tempo point', a0.end, 4); // 拍6→8 全在变速前：3→4s
+    near('relay post-change seconds', a1.start, 4);
+    near('relay post-change end', a1.end, 6); // 60 BPM：2 拍 = 2s
+    // [3,4) 与 [4,6) 半开相邻不重叠 → 门槛 1 下任意时刻都至少 1 人发声
+    const overlap = a0.start < a1.end - 1e-9 && a1.start < a0.end - 1e-9;
+    check('relay respects threshold across change', overlap, false);
+  }
+}
+
+// 24. 窗口越过全曲时长：候选全部越界 → no-slot
+{
+  const p = relayProject([[], []], { minSingers: 1, duration: 3, bpm: 120 }); // 全曲仅到拍 6
+  const r = planRelay(p, { partId: 'p1', startBeat: 8, endBeat: 16, breathBeats: 2 });
+  check('relay beyond duration no-slot', r.ok ? null : r.reason, 'no-slot');
+}
+
+// 25. 拍域内已有换气已使门槛超标 → coverage（提示先调整已有换气）
+{
+  // 3 人声部门槛 2（最多 1 人换气），窗口内歌手1、歌手2 已在同一时刻换气
+  const p = relayProject([[[1, 2]], [[1, 2]], []], { minSingers: 2, bpm: 120 });
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 8, breathBeats: 1 });
+  check('relay existing-overload coverage', r.ok ? null : r.reason, 'coverage');
+}
+
+// 26. 搜索不修改原工程；applyRelay 每人恰好追加一段；取消即原工程不变
+{
+  const p = relayProject([[], []], { minSingers: 1, bpm: 120 });
+  const snapshot = JSON.stringify(p);
+  const r = planRelay(p, { partId: 'p1', startBeat: 0, endBeat: 8, breathBeats: 2 });
+  check('relay plan is pure', JSON.stringify(p), snapshot);
+  if (r.ok) {
+    const next = applyRelay(p, r);
+    check(
+      'relay apply adds one each',
+      next.singers.map((s) => s.breaths.length),
+      [1, 1],
+    );
+    check('relay apply keeps original untouched', p.singers.every((s) => s.breaths.length === 0), true);
+    // 写入内容与预览一致
+    check(
+      'relay apply matches preview',
+      next.singers
+        .map((s) => s.breaths[0])
+        .map((b) => [b.start, b.end])
+        .sort((x, y) => x[0] - y[0]),
+      r.assignments
+        .map((a) => [a.start, a.end])
+        .sort((x, y) => x[0] - y[0]),
+    );
+  }
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);

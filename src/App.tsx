@@ -5,11 +5,13 @@ import { loadProject, sanitizeProject, saveProject, uid } from './lib/storage';
 import { normalizeBeatMap } from './lib/tempo';
 import { partUnder, totalSeconds, type Segment } from './lib/coverage';
 import { applyMove, findBestMove, type OptimizeResult } from './lib/optimize';
+import { applyRelay, planRelay, type RelayRequest, type RelayResult, type RelaySuccess } from './lib/relay';
 import { MIN_DURATION, clamp } from './lib/constraints';
 import { fmtClock, fmtOffset } from './lib/format';
 import Sidebar from './components/Sidebar';
 import Timeline, { type Ghost } from './components/Timeline';
 import OptimizerPanel from './components/OptimizerPanel';
+import RelayPanel from './components/RelayPanel';
 
 export default function App() {
   const [project, setProject] = useState<Project>(() => loadProject() ?? createSampleProject());
@@ -17,6 +19,7 @@ export default function App() {
   const [range, setRange] = useState(10);
   const [result, setResult] = useState<OptimizeResult | null>(null);
   const [previewOffset, setPreviewOffset] = useState<number | null>(null);
+  const [relay, setRelay] = useState<RelaySuccess | null>(null);
   const [pxPerSec, setPxPerSec] = useState(10);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -32,22 +35,33 @@ export default function App() {
     setPreviewOffset(null);
   }, []);
 
-  /** 所有工程修改的统一入口：修改后寻优结果即失效 */
+  const clearRelay = useCallback(() => setRelay(null), []);
+
+  /**
+   * 所有工程修改的统一入口：修改后寻优 / 接力预览均失效
+   * （预览基于修改前的工程，继续展示会与时间轴不符）。
+   */
   const mutate = useCallback(
     (fn: (p: Project) => Project) => {
       clearOptimization();
+      clearRelay();
       setProject(fn);
     },
-    [clearOptimization],
+    [clearOptimization, clearRelay],
   );
 
   /**
    * 仅修改节拍图：换气段的实际秒位置保持不变（仅重新显示对应拍位），
-   * 因此不影响寻优结果（寻优基于秒），无需清空预览。
+   * 因此不影响寻优结果（寻优基于秒），无需清空寻优预览；
+   * 但接力排程的候选是在旧拍域上枚举的，节拍图一变即失效，需退出接力预览。
    */
-  const mutateBeatMap = useCallback((fn: (b: Project['beatMap']) => Project['beatMap']) => {
-    setProject((p) => ({ ...p, beatMap: normalizeBeatMap(fn(p.beatMap)) }));
-  }, []);
+  const mutateBeatMap = useCallback(
+    (fn: (b: Project['beatMap']) => Project['beatMap']) => {
+      clearRelay();
+      setProject((p) => ({ ...p, beatMap: normalizeBeatMap(fn(p.beatMap)) }));
+    },
+    [clearRelay],
+  );
 
   // 选中的换气段被删除后，清空选择
   useEffect(() => {
@@ -61,11 +75,15 @@ export default function App() {
 
   const previewing = result !== null && previewOffset !== null;
 
-  /** 预览时：把选中换气段按预览位移临时移动后的工程 */
-  const effectiveProject = useMemo(
-    () => (previewing && result ? applyMove(project, result.singerId, result.intervalId, previewOffset) : project),
-    [project, previewing, result, previewOffset],
-  );
+  /**
+   * 时间轴实际展示与覆盖计算所基于的工程：
+   * 接力整组预览优先（预览期不允许同时做单段寻优）；其次为单段寻优预览。
+   */
+  const effectiveProject = useMemo(() => {
+    if (relay) return applyRelay(project, relay);
+    if (previewing && result) return applyMove(project, result.singerId, result.intervalId, previewOffset);
+    return project;
+  }, [project, relay, previewing, result, previewOffset]);
 
   const coverage = useMemo(() => {
     const m = new Map<string, ReturnType<typeof partUnder>>();
@@ -80,12 +98,23 @@ export default function App() {
   const underCount = useMemo(() => [...coverage.values()].reduce((acc, segs) => acc + segs.length, 0), [coverage]);
 
   const ghost: Ghost | null = useMemo(() => {
-    if (!previewing || !result) return null;
+    if (relay || !previewing || !result) return null;
     const s = project.singers.find((x) => x.id === result.singerId);
     const b = s?.breaths.find((x) => x.id === result.intervalId);
     if (!s || !b) return null;
     return { singerId: s.id, start: b.start + previewOffset, end: b.end + previewOffset };
-  }, [previewing, result, project, previewOffset]);
+  }, [relay, previewing, result, project, previewOffset]);
+
+  /** 接力排程整组预览：幽灵块 + 拍域窗口 */
+  const relayPreview = useMemo(() => {
+    if (!relay) return null;
+    return {
+      partId: relay.partId,
+      windowStart: relay.windowStart,
+      windowEnd: relay.windowEnd,
+      ghosts: relay.assignments.map((a) => ({ singerId: a.singerId, start: a.start, end: a.end })),
+    };
+  }, [relay]);
 
   // ---------- 换气段操作 ----------
   const updateInterval = useCallback(
@@ -142,6 +171,7 @@ export default function App() {
   // ---------- 寻优 ----------
   const runOptimize = () => {
     if (!selection) return;
+    clearRelay();
     const r = findBestMove(project, selection.singerId, selection.intervalId, Math.max(0, Math.round(range)));
     if (!r) return;
     setResult(r);
@@ -152,6 +182,22 @@ export default function App() {
     if (!result || previewOffset === null) return;
     setProject((p) => applyMove(p, result.singerId, result.intervalId, previewOffset));
     clearOptimization();
+  };
+
+  // ---------- 声部接力排程 ----------
+  const runRelay = (req: RelayRequest): RelayResult => {
+    clearOptimization();
+    const r = planRelay(project, req);
+    // 仅在成功时进入整组幽灵块预览；失败原因（区分两类）交给面板展示
+    setRelay(r.ok ? r : null);
+    return r;
+  };
+
+  /** 确认：整组一次写入；取消：不改工程（effectProject 立即回到原工程）。 */
+  const applyRelayPreview = () => {
+    if (!relay) return;
+    setProject((p) => applyRelay(p, relay));
+    setRelay(null);
   };
 
   // ---------- 导入 / 导出 ----------
@@ -172,6 +218,7 @@ export default function App() {
         const p = sanitizeProject(JSON.parse(txt));
         if (!p) throw new Error('invalid');
         clearOptimization();
+        clearRelay();
         setSelection(null);
         setProject(p);
       })
@@ -180,6 +227,7 @@ export default function App() {
 
   const loadSample = () => {
     clearOptimization();
+    clearRelay();
     setSelection(null);
     setProject(createSampleProject());
   };
@@ -217,7 +265,10 @@ export default function App() {
             <div className="stat">
               全曲未达标：
               <b className={totalUnder > 0 ? 'bad' : 'ok'}>{totalUnder.toFixed(1)}s</b>
-              <span className="muted">（{underCount} 处{previewing ? ' · 预览中' : ''}）</span>
+              <span className="muted">
+                （{underCount} 处{previewing ? ' · 寻优预览中' : ''}
+                {relay ? ' · 接力预览中' : ''}）
+              </span>
             </div>
             <div className="zoom">
               <span className="muted">缩放</span>
@@ -237,18 +288,39 @@ export default function App() {
             </div>
           )}
 
+          {relay && (
+            <div className="preview-banner relay-banner">
+              🔗 声部接力排程预览中：已为声部每位歌手安排一段新换气（虚线幽灵块），琥珀色为所选拍域窗口；
+              红色覆盖行按整组写入后实时计算。
+              <button className="primary" onClick={applyRelayPreview}>
+                确认整组写入
+              </button>
+              <button onClick={clearRelay}>取消（不改工程）</button>
+            </div>
+          )}
+
           <Timeline
             project={project}
             coverage={coverage}
             selection={selection}
             ghost={ghost}
+            relayPreview={relayPreview}
             pxPerSec={pxPerSec}
             onSelect={(sel) => {
               clearOptimization();
+              clearRelay();
               setSelection(sel);
             }}
             onUpdateInterval={updateInterval}
             onAddInterval={addInterval}
+          />
+
+          <RelayPanel
+            project={project}
+            result={relay}
+            onPlan={runRelay}
+            onApply={applyRelayPreview}
+            onCancel={clearRelay}
           />
 
           <OptimizerPanel

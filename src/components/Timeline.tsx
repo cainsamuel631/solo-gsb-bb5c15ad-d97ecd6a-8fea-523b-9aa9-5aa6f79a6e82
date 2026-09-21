@@ -12,6 +12,14 @@ export interface Ghost {
   end: number;
 }
 
+/** 接力排程预览：整组幽灵块 + 拍域窗口（秒） */
+export interface RelayPreview {
+  partId: string;
+  windowStart: number;
+  windowEnd: number;
+  ghosts: Ghost[];
+}
+
 type RulerMode = 'seconds' | 'beats';
 
 interface Props {
@@ -20,6 +28,8 @@ interface Props {
   coverage: Map<string, UnderSegment[]>;
   selection: Selection | null;
   ghost: Ghost | null;
+  /** 声部接力排程的整组幽灵块预览（null = 未在预览） */
+  relayPreview: RelayPreview | null;
   pxPerSec: number;
   onSelect: (sel: Selection | null) => void;
   onUpdateInterval: (singerId: string, intervalId: string, start: number, end: number) => void;
@@ -153,6 +163,10 @@ export default function Timeline(props: Props) {
         const singers = project.singers.filter((s) => s.partId === part.id);
         const under = props.coverage.get(part.id) ?? [];
         const underSec = totalSeconds(under);
+        const relayWin =
+          props.relayPreview && props.relayPreview.partId === part.id
+            ? props.relayPreview
+            : null;
         return (
           <div className="part-block" key={part.id}>
             <div className="trow coverage-row">
@@ -166,6 +180,15 @@ export default function Timeline(props: Props) {
               </div>
               <div className="track coverage-track" style={gridStyle}>
                 {beatMode && beatGrid}
+                {relayWin && (
+                  <div
+                    className="relay-window"
+                    style={{
+                      left: relayWin.windowStart * pxPerSec,
+                      width: (relayWin.windowEnd - relayWin.windowStart) * pxPerSec,
+                    }}
+                  />
+                )}
                 {under.map((seg) => (
                   <div
                     key={`${seg.start}-${seg.end}`}
@@ -190,22 +213,35 @@ export default function Timeline(props: Props) {
               </div>
             )}
 
-            {singers.map((singer) => (
-              <div className="trow singer-row" key={singer.id}>
-                <div className="trow-label">{singer.name}</div>
-                <div
-                  className="track singer-track"
-                  style={gridStyle}
-                  onDoubleClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const t = (e.clientX - rect.left) / pxPerSec;
-                    const seg = beatSnap
-                      ? placeNewIntervalOnBeat(t, singer.breaths, project.duration, beatMap)
-                      : placeNewInterval(t, singer.breaths, project.duration);
-                    if (seg) props.onAddInterval(singer.id, seg);
-                  }}
-                >
-                  {beatMode && beatGrid}
+            {singers.map((singer) => {
+              const relayGhosts = props.relayPreview
+                ? props.relayPreview.ghosts.filter((g) => g.singerId === singer.id)
+                : [];
+              return (
+                <div className="trow singer-row" key={singer.id}>
+                  <div className="trow-label">{singer.name}</div>
+                  <div
+                    className="track singer-track"
+                    style={gridStyle}
+                    onDoubleClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const t = (e.clientX - rect.left) / pxPerSec;
+                      const seg = beatSnap
+                        ? placeNewIntervalOnBeat(t, singer.breaths, project.duration, beatMap)
+                        : placeNewInterval(t, singer.breaths, project.duration);
+                      if (seg) props.onAddInterval(singer.id, seg);
+                    }}
+                  >
+                    {beatMode && beatGrid}
+                    {relayWin && (
+                      <div
+                        className="relay-window singer"
+                        style={{
+                          left: relayWin.windowStart * pxPerSec,
+                          width: (relayWin.windowEnd - relayWin.windowStart) * pxPerSec,
+                        }}
+                      />
+                    )}
                   {singer.breaths.map((b) => (
                     <BreathBlock
                       key={b.id}
@@ -237,9 +273,22 @@ export default function Timeline(props: Props) {
                       }}
                     />
                   )}
+                  {relayGhosts.map((g) => (
+                    <div
+                      key={`relay-${g.start}-${g.end}`}
+                      className="breath-ghost relay"
+                      style={{
+                        left: g.start * pxPerSec,
+                        width: Math.max(4, (g.end - g.start) * pxPerSec),
+                        borderColor: part.color,
+                      }}
+                      title={`接力换气（预览）${fmtSec(g.start)} – ${fmtSec(g.end)}`}
+                    />
+                  ))}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         );
       })}

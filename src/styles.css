@@ -153,7 +153,8 @@ button.ghost-btn:hover {
 
 input[type='text'],
 input[type='number'],
-input:not([type]) {
+input:not([type]),
+select {
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
@@ -786,4 +787,108 @@ input[type='number'] {
 
 .beat-grid-line.major {
   background: rgba(125, 211, 252, 0.35);
+}
+
+/* ---------- 声部接力排程 ---------- */
+.relay-banner {
+  background: #14323a;
+  border-bottom-color: #0e7490;
+  color: #a5f3fc;
+}
+
+.breath-ghost.relay {
+  border-width: 2px;
+  border-style: dashed;
+  background: rgba(251, 191, 36, 0.12);
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.35);
+}
+
+.relay-window {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: rgba(251, 191, 36, 0.07);
+  border-left: 2px dashed rgba(251, 191, 36, 0.75);
+  border-right: 2px dashed rgba(251, 191, 36, 0.75);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.relay-window.singer {
+  top: 0;
+  bottom: 0;
+  opacity: 0.7;
+}
+
+.relay-panel {
+  max-height: 40%;
+}
+
+.relay-form {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.relay-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.relay-field > span {
+  color: var(--muted);
+}
+
+.relay-field input {
+  width: 56px;
+}
+
+.relay-field select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  min-width: 150px;
+}
+
+.relay-sep {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.relay-error {
+  margin: 4px 0;
+  font-size: 13px;
+}
+
+.relay-warn {
+  color: #fbbf24;
+}
+
+.relay-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 2px 18px;
+  font-size: 13px;
+}
+
+.relay-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.relay-list .muted {
+  font-size: 12px;
 }
